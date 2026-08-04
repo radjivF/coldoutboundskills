@@ -420,6 +420,10 @@ def _is_decision_maker_title(title: str) -> bool:
         r"director of engineering",
         r"engineering (?:manager|director)",
         r"\btechn(?:ical|ology) (?:director|lead|head)",
+        r"\btechnical account manager\b",
+        r"\btam\b",
+        r"\bdirector of software\b",
+        r"\bgeneral manager\b",
     ]
     # Prefer engineering/product leadership; reject generic account/creative directors
     deny = [
@@ -431,6 +435,11 @@ def _is_decision_maker_title(title: str) -> bool:
         r"people .*director",
         r"operations director",
         r"non[\-\s]?executive",
+        r"customer support",
+        r"compensation",
+        r"employee experience",
+        r"demand generation",
+        r"\bpre[\-\s]?sales\b",
     ]
     if _matches_any(t, deny):
         return False
@@ -555,6 +564,63 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
             continue
         per_company[ckey] = per_company.get(ckey, 0) + 1
         candidates.append((person, company))
+
+    # Fallback: per-domain search for companies missing from the batch page
+    covered = { (c.get("domain") or c.get("name") or "") for _, c in candidates }
+    missing = [
+        c for c in companies.values()
+        if (c.get("domain") or c.get("name") or "") not in covered
+    ]
+    if missing:
+        print(f"[Prospeo] Per-company fallback for {len(missing)} uncovered companies...")
+        for company in missing:
+            time.sleep(1.2)
+            filters_one: dict[str, Any] = {
+                "person_job_title": {
+                    "include": DM_TITLES,
+                    "match_only_exact_job_titles": False,
+                },
+            }
+            if company.get("domain"):
+                filters_one["company"] = {"websites": {"include": [company["domain"]]}}
+            elif company.get("name"):
+                filters_one["company"] = {"names": {"include": [company["name"]]}}
+            else:
+                continue
+            try:
+                r1 = requests.post(
+                    f"{PROSPEO_API}/search-person",
+                    headers={"X-KEY": api_key, "Content-Type": "application/json"},
+                    json={"page": 1, "filters": filters_one},
+                    timeout=HTTP_TIMEOUT,
+                )
+            except requests.RequestException as exc:
+                raise PipelineError(f"Prospeo search network error: {exc}") from exc
+            if r1.status_code == 429:
+                raise PipelineError(f"Prospeo rate limit (HTTP 429): {r1.text[:500]}")
+            if r1.status_code >= 400:
+                try:
+                    b1 = r1.json()
+                except Exception:
+                    b1 = {}
+                if b1.get("error_code") == "NO_RESULTS":
+                    print(f"  {company.get('name')}: no results")
+                    continue
+                raise PipelineError(
+                    f"Prospeo search API error HTTP {r1.status_code}: {r1.text[:800]}"
+                )
+            rows = (r1.json().get("results") or [])
+            added = 0
+            for row in rows:
+                if added >= 2:
+                    break
+                person = row.get("person") or {}
+                title = person.get("current_job_title") or ""
+                if not _is_decision_maker_title(title) or not person.get("person_id"):
+                    continue
+                candidates.append((person, company))
+                added += 1
+            print(f"  {company.get('name')}: +{added} candidates")
 
     print(f"[Prospeo] Title-gated candidates to enrich: {len(candidates)}")
     time.sleep(1.2)
