@@ -72,6 +72,11 @@ RESUME_FIT_PATTERNS = [
     r"\blead (?:software |frontend |backend |full[\s\-]?stack )?engineer\b",
     r"\bsolutions?\s*architect\b",
     r"\bsoftware architect\b",
+    # .NET / platform eng (e.g. Preacta, Kudosity)
+    r"\.net",
+    r"\bdotnet\b",
+    r"\bc#\b",
+    r"\bplatform engineer\b",
     # Freelance / LLM-eval style roles
     r"\bchatbot (?:developer|engineer|builder)\b",
     r"\bagent evaluation\b",
