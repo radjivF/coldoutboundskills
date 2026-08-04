@@ -458,7 +458,7 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
             f"{len(results)} people"
         )
 
-        for row in results[:5]:  # cap DMs per company
+        for row in results[:3]:  # cap DMs per company (credits are limited)
             person = row.get("person") or {}
             title = person.get("current_job_title") or ""
             if _matches_any(title, RECRUITER_PATTERNS):
@@ -467,6 +467,7 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
             if not person_id:
                 continue
             enriched = prospeo_enrich(api_key, person_id)
+            time.sleep(1.2)  # pace enrich calls under Prospeo burst limits
             email = (
                 ((enriched.get("person") or {}).get("email") or {})
             )
@@ -505,8 +506,8 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
             }
             dms.append(dm)
 
-        # polite pacing (~2 rps max); stop on rate limit rather than retry loops
-        time.sleep(0.55)
+        # Prospeo burst limit is tighter than monthly credits — keep <1 rps
+        time.sleep(1.5)
 
     print(f"[Prospeo] Found {len(dms)} decision-makers (pre-MV)")
     write_json(OUT_DIR / "03_dms_enriched.json", dms)
