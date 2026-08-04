@@ -72,11 +72,14 @@ RESUME_FIT_PATTERNS = [
     r"\blead (?:software |frontend |backend |full[\s\-]?stack )?engineer\b",
     r"\bsolutions?\s*architect\b",
     r"\bsoftware architect\b",
-    # .NET / platform eng (e.g. Preacta, Kudosity)
-    r"\.net",
-    r"\bdotnet\b",
-    r"\bc#\b",
-    r"\bplatform engineer\b",
+    # Backend / app roles (e.g. Vanilla Rocket, Red Energy)
+    r"\bbackend engineer\b",
+    r"\bback[\s\-]?end engineer\b",
+    r"\bapplication developer\b",
+    r"\bapp developer\b",
+    # Customer-facing technical roles (e.g. Intelerad TAM)
+    r"\btechnical account manager\b",
+    r"\btam\b",
     # Freelance / LLM-eval style roles
     r"\bchatbot (?:developer|engineer|builder)\b",
     r"\bagent evaluation\b",
