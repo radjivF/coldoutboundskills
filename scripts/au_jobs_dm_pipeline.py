@@ -56,7 +56,10 @@ SEARCH_KEYWORDS = [
     "AI",
 ]
 
-# Job titles we want to hire-for (resume-fit)
+# Job titles we want to hire-for (resume-fit).
+# KEEP examples: Vanilla Rocket (Senior Backend Engineer), Intelerad (TAM),
+# Red Energy (Application Developer), fullstack/React/AI/tech lead, chatbot/agent-eval.
+# DROP examples: Preacta (.NET), Kudosity (platform/junior), generic data/QA/BA/UX.
 RESUME_FIT_PATTERNS = [
     r"\bai\b",
     r"\bmachine learning\b",
@@ -72,12 +75,13 @@ RESUME_FIT_PATTERNS = [
     r"\blead (?:software |frontend |backend |full[\s\-]?stack )?engineer\b",
     r"\bsolutions?\s*architect\b",
     r"\bsoftware architect\b",
-    # Backend / app roles (e.g. Vanilla Rocket, Red Energy)
+    # Backend / app roles (Vanilla Rocket, Red Energy) — do NOT add .NET / platform eng
     r"\bbackend engineer\b",
     r"\bback[\s\-]?end engineer\b",
+    r"\bback end engineer\b",
     r"\bapplication developer\b",
     r"\bapp developer\b",
-    # Customer-facing technical roles (e.g. Intelerad TAM)
+    # Customer-facing technical roles (Intelerad TAM)
     r"\btechnical account manager\b",
     r"\btam\b",
     # Freelance / LLM-eval style roles
@@ -116,6 +120,10 @@ DM_TITLES = [
     "Chief Executive Officer",
     "Head of Product",
     "VP Product",
+    "Technical Director",
+    "Technical Account Manager",
+    "Director of Software Development",
+    "General Manager",
 ]
 
 HTTP_TIMEOUT = 60
