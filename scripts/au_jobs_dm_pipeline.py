@@ -387,10 +387,48 @@ def filter_jobs(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
+def _is_decision_maker_title(title: str) -> bool:
+    """Client-side title gate — Prospeo title match is loose (e.g. any 'Director')."""
+    t = (title or "").lower()
+    if not t or _matches_any(t, RECRUITER_PATTERNS):
+        return False
+    allow = [
+        r"\bcto\b",
+        r"chief technology",
+        r"\bceo\b",
+        r"chief executive",
+        r"\bfounder\b",
+        r"co[\-\s]?founder",
+        r"vp(?:\s|$)|\bvice president\b",
+        r"head of engineering",
+        r"head of product",
+        r"director of engineering",
+        r"engineering (?:manager|director)",
+        r"\btechn(?:ical|ology) (?:director|lead|head)",
+    ]
+    # Prefer engineering/product leadership; reject generic account/creative directors
+    deny = [
+        r"account director",
+        r"creative director",
+        r"strategy director",
+        r"business director",
+        r"program director",
+        r"people .*director",
+        r"operations director",
+        r"non[\-\s]?executive",
+    ]
+    if _matches_any(t, deny):
+        return False
+    return _matches_any(t, allow)
+
+
 def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Search decision-makers at kept companies; enrich emails."""
+    """Search decision-makers at kept companies; enrich emails.
+
+    Uses one batched /search-person call (all company websites) to stay under
+    tight daily search rate limits (often ~50/day on starter plans).
+    """
     dms: list[dict[str, Any]] = []
-    # Group jobs by company domain/name
     companies: dict[str, dict[str, Any]] = {}
     for job in jobs:
         domain = _company_domain(job)
@@ -409,81 +447,121 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
         )
         entry["jobs"].append(job)
 
-    print(f"[Prospeo] Searching DMs at {len(companies)} companies...")
-    for i, (key, company) in enumerate(companies.items(), 1):
-        filters: dict[str, Any] = {
-            "person_job_title": {
-                "include": DM_TITLES,
-                "match_only_exact_job_titles": False,
-            },
-        }
-        if company["domain"]:
-            filters["company"] = {"websites": {"include": [company["domain"]]}}
-        elif company["name"]:
-            filters["company"] = {"names": {"include": [company["name"]]}}
-        else:
-            continue
+    domains = [c["domain"] for c in companies.values() if c.get("domain")]
+    names_only = [c["name"] for c in companies.values() if not c.get("domain") and c.get("name")]
+    print(
+        f"[Prospeo] Batched DM search across {len(domains)} domains "
+        f"(+{len(names_only)} name-only companies)..."
+    )
 
-        payload = {"page": 1, "filters": filters}
-        try:
-            resp = requests.post(
-                f"{PROSPEO_API}/search-person",
-                headers={"X-KEY": api_key, "Content-Type": "application/json"},
-                json=payload,
-                timeout=HTTP_TIMEOUT,
-            )
-        except requests.RequestException as exc:
-            raise PipelineError(f"Prospeo search network error: {exc}") from exc
+    filters: dict[str, Any] = {
+        "person_job_title": {
+            "include": DM_TITLES,
+            "match_only_exact_job_titles": False,
+        },
+    }
+    company_filter: dict[str, Any] = {}
+    if domains:
+        company_filter["websites"] = {"include": domains}
+    if names_only:
+        company_filter["names"] = {"include": names_only}
+    if not company_filter:
+        print("[Prospeo] No company domains/names to search")
+        return []
+    filters["company"] = company_filter
 
-        if resp.status_code == 429:
-            raise PipelineError(f"Prospeo rate limit (HTTP 429): {resp.text[:500]}")
-        if resp.status_code >= 400:
-            # NO_RESULTS is not fatal for a single company
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            code = body.get("error_code") or ""
-            if code in ("NO_RESULTS",):
-                print(f"  [{i}/{len(companies)}] {company['name'] or company['domain']}: no results")
-                continue
-            raise PipelineError(
-                f"Prospeo search API error HTTP {resp.status_code}: {resp.text[:800]}"
-            )
+    try:
+        resp = requests.post(
+            f"{PROSPEO_API}/search-person",
+            headers={"X-KEY": api_key, "Content-Type": "application/json"},
+            json={"page": 1, "filters": filters},
+            timeout=HTTP_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise PipelineError(f"Prospeo search network error: {exc}") from exc
 
-        body = resp.json()
-        results = body.get("results") or []
+    # Surface remaining daily search quota when present
+    daily_left = resp.headers.get("x-daily-request-left")
+    if daily_left is not None:
         print(
-            f"  [{i}/{len(companies)}] {company['name'] or company['domain']}: "
-            f"{len(results)} people"
+            f"[Prospeo] search rate: daily_left={daily_left}/"
+            f"{resp.headers.get('x-daily-rate-limit')} "
+            f"minute_left={resp.headers.get('x-minute-request-left')}"
         )
 
-        for row in results[:3]:  # cap DMs per company (credits are limited)
-            person = row.get("person") or {}
-            title = person.get("current_job_title") or ""
-            if _matches_any(title, RECRUITER_PATTERNS):
-                continue
-            person_id = person.get("person_id")
-            if not person_id:
-                continue
-            enriched = prospeo_enrich(api_key, person_id)
-            time.sleep(1.2)  # pace enrich calls under Prospeo burst limits
-            email = (
-                ((enriched.get("person") or {}).get("email") or {})
-            )
-            if isinstance(email, dict):
-                email_addr = email.get("email") or ""
-            else:
-                email_addr = email or ""
-            if not email_addr:
-                # fallback nested shapes
-                email_addr = (
-                    (enriched.get("person") or {}).get("email")
-                    if isinstance((enriched.get("person") or {}).get("email"), str)
-                    else ""
-                ) or ""
+    if resp.status_code == 429:
+        raise PipelineError(f"Prospeo rate limit (HTTP 429): {resp.text[:500]}")
+    if resp.status_code >= 400:
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        if body.get("error_code") == "NO_RESULTS":
+            print("[Prospeo] Batched search: no results")
+            write_json(OUT_DIR / "03_dms_enriched.json", [])
+            return []
+        raise PipelineError(
+            f"Prospeo search API error HTTP {resp.status_code}: {resp.text[:800]}"
+        )
 
-            dm = {
+    body = resp.json()
+    results = body.get("results") or []
+    print(f"[Prospeo] Batched search returned {len(results)} people (pre title-gate)")
+
+    # Map domain -> company entry for joining jobs
+    by_domain = {c["domain"]: c for c in companies.values() if c.get("domain")}
+    by_name = {c["name"].lower(): c for c in companies.values() if c.get("name")}
+
+    # Keep at most 2 DMs per company; enrich only those (monthly credits)
+    per_company: dict[str, int] = {}
+    candidates: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for row in results:
+        person = row.get("person") or {}
+        company_obj = row.get("company") or {}
+        title = person.get("current_job_title") or ""
+        if not _is_decision_maker_title(title):
+            continue
+        person_id = person.get("person_id")
+        if not person_id:
+            continue
+        domain = (company_obj.get("domain") or "").lower().removeprefix("www.")
+        name = (company_obj.get("name") or "").strip()
+        company = by_domain.get(domain) or by_name.get(name.lower())
+        if not company:
+            # fuzzy: domain substring match
+            for d, c in by_domain.items():
+                if d and (d in domain or domain in d):
+                    company = c
+                    break
+        if not company:
+            continue
+        ckey = company.get("domain") or company.get("name") or "?"
+        if per_company.get(ckey, 0) >= 2:
+            continue
+        per_company[ckey] = per_company.get(ckey, 0) + 1
+        candidates.append((person, company))
+
+    print(f"[Prospeo] Title-gated candidates to enrich: {len(candidates)}")
+    time.sleep(1.2)
+
+    for person, company in candidates:
+        person_id = person.get("person_id")
+        enriched = prospeo_enrich(api_key, person_id)
+        time.sleep(1.2)
+        email = ((enriched.get("person") or {}).get("email") or {})
+        if isinstance(email, dict):
+            email_addr = email.get("email") or ""
+        else:
+            email_addr = email or ""
+        if not email_addr:
+            email_addr = (
+                (enriched.get("person") or {}).get("email")
+                if isinstance((enriched.get("person") or {}).get("email"), str)
+                else ""
+            ) or ""
+
+        dms.append(
+            {
                 "person_id": person_id,
                 "first_name": person.get("first_name")
                 or (enriched.get("person") or {}).get("first_name")
@@ -491,7 +569,7 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
                 "last_name": person.get("last_name")
                 or (enriched.get("person") or {}).get("last_name")
                 or "",
-                "position": title
+                "position": person.get("current_job_title")
                 or (enriched.get("person") or {}).get("current_job_title")
                 or "",
                 "email": email_addr if isinstance(email_addr, str) else "",
@@ -504,10 +582,7 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
                 or ((enriched.get("company") or {}).get("domain") or ""),
                 "jobs": company["jobs"],
             }
-            dms.append(dm)
-
-        # Prospeo burst limit is tighter than monthly credits — keep <1 rps
-        time.sleep(1.5)
+        )
 
     print(f"[Prospeo] Found {len(dms)} decision-makers (pre-MV)")
     write_json(OUT_DIR / "03_dms_enriched.json", dms)
