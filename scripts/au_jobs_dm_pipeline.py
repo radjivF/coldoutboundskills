@@ -273,13 +273,41 @@ def build_search_urls() -> list[str]:
     return urls
 
 
+def _run_to_dict(run: Any) -> dict[str, Any]:
+    """Normalize apify-client v3 Run models and legacy dict responses."""
+    if run is None:
+        return {}
+    if isinstance(run, dict):
+        return run
+    if hasattr(run, "model_dump"):
+        return run.model_dump()
+    if hasattr(run, "dict"):
+        return run.dict()  # type: ignore[no-any-return]
+    return {
+        "id": getattr(run, "id", None),
+        "status": getattr(run, "status", None),
+        "default_dataset_id": getattr(run, "default_dataset_id", None),
+        "defaultDatasetId": getattr(run, "defaultDatasetId", None),
+    }
+
+
 def scrape_jobs(apify_key: str) -> list[dict[str, Any]]:
     if ApifyClient is None:
         raise PipelineError("apify-client not installed. Run: pip install apify-client")
 
+    client = ApifyClient(apify_key)
+
+    # Optional reuse of an existing dataset (avoids re-spend on Apify)
+    reuse_dataset = os.environ.get("AU_PIPELINE_DATASET_ID", "").strip()
+    if reuse_dataset:
+        print(f"[Apify] Reusing dataset {reuse_dataset}")
+        jobs = list(client.dataset(reuse_dataset).iterate_items())
+        print(f"[Apify] Loaded {len(jobs)} raw jobs from dataset")
+        write_json(OUT_DIR / "01_raw_jobs.json", jobs)
+        return jobs
+
     urls = build_search_urls()
     print(f"[Apify] Starting {ACTOR_ID} with {len(urls)} AU search URLs, count={MAX_JOBS}, scrapeCompany=true")
-    client = ApifyClient(apify_key)
     run_input = {
         "urls": urls,
         "scrapeCompany": True,
@@ -295,18 +323,25 @@ def scrape_jobs(apify_key: str) -> list[dict[str, Any]]:
             raise PipelineError(f"Apify rate limit: {msg}") from exc
         raise PipelineError(f"Apify actor call failed: {msg}") from exc
 
-    if not run:
+    run_dict = _run_to_dict(run)
+    if not run_dict:
         raise PipelineError("Apify returned empty run result")
-    status = run.get("status")
-    if status and status not in ("SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"):
-        raise PipelineError(f"Apify run status={status}: {json.dumps(run)[:800]}")
 
-    dataset_id = run.get("defaultDatasetId")
+    status = run_dict.get("status")
+    if status and status not in ("SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"):
+        raise PipelineError(f"Apify run status={status}: {json.dumps(run_dict, default=str)[:800]}")
+
+    dataset_id = (
+        run_dict.get("default_dataset_id")
+        or run_dict.get("defaultDatasetId")
+    )
     if not dataset_id:
-        raise PipelineError(f"Apify run missing defaultDatasetId: {json.dumps(run)[:800]}")
+        raise PipelineError(
+            f"Apify run missing default_dataset_id: {json.dumps(run_dict, default=str)[:800]}"
+        )
 
     jobs = list(client.dataset(dataset_id).iterate_items())
-    print(f"[Apify] Scraped {len(jobs)} raw jobs (runId={run.get('id')})")
+    print(f"[Apify] Scraped {len(jobs)} raw jobs (runId={run_dict.get('id')}, dataset={dataset_id})")
     write_json(OUT_DIR / "01_raw_jobs.json", jobs)
     return jobs
 
