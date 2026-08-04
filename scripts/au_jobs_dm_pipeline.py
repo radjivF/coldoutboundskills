@@ -72,6 +72,13 @@ RESUME_FIT_PATTERNS = [
     r"\blead (?:software |frontend |backend |full[\s\-]?stack )?engineer\b",
     r"\bsolutions?\s*architect\b",
     r"\bsoftware architect\b",
+    # Freelance / LLM-eval style roles
+    r"\bchatbot (?:developer|engineer|builder)\b",
+    r"\bagent evaluation\b",
+    r"\bevaluation engineer\b",
+    r"\bai evaluat(?:or|ion)\b",
+    r"\bllm evaluat(?:or|ion)\b",
+    r"\bprompt (?:engineer|engineering)\b",
 ]
 
 RECRUITER_PATTERNS = [
