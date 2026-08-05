@@ -698,10 +698,11 @@ def prospeo_enrich(api_key: str, person_id: str) -> dict[str, Any]:
         except Exception:
             body = {"raw": resp.text[:500]}
         code = body.get("error_code") or ""
-        if code in ("NO_RESULTS", "INVALID_REQUEST", "INSUFFICIENT_CREDITS"):
-            if code == "INSUFFICIENT_CREDITS":
-                raise PipelineError(f"Prospeo insufficient credits: {resp.text[:500]}")
+        # Soft misses: person found in search but enrich has no verified email/match.
+        if code in ("NO_RESULTS", "NO_MATCH", "INVALID_REQUEST"):
             return {}
+        if code == "INSUFFICIENT_CREDITS":
+            raise PipelineError(f"Prospeo insufficient credits: {resp.text[:500]}")
         raise PipelineError(
             f"Prospeo enrich API error HTTP {resp.status_code}: {resp.text[:800]}"
         )
