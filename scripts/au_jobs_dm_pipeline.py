@@ -234,6 +234,41 @@ def _company_name(job: dict[str, Any]) -> str:
     ).strip() if not isinstance(job.get("company"), dict) else ""
 
 
+# Multi-label public suffixes common in AU/outbound lists.
+# Prospeo rejects subdomains ("Subdomains are not supported"), so we collapse
+# hosts like super.myninja.ai → myninja.ai and careers.acme.com.au → acme.com.au.
+_MULTI_PART_SUFFIXES = (
+    "com.au",
+    "net.au",
+    "org.au",
+    "edu.au",
+    "gov.au",
+    "co.nz",
+    "co.uk",
+    "org.uk",
+    "com",
+)
+
+
+def _registrable_domain(host: str) -> str:
+    """Collapse hostname to a Prospeo-safe root domain (no subdomain)."""
+    host = (host or "").lower().strip().removeprefix("www.")
+    if not host or "." not in host:
+        return host
+    for suffix in _MULTI_PART_SUFFIXES:
+        # Prefer longer AU-style suffixes (com.au) before bare "com"
+        if host == suffix or host.endswith("." + suffix):
+            # Take one label + suffix (acme.com.au) — drop deeper subdomains
+            labels = host[: -(len(suffix) + 1)].split(".")
+            if not labels or labels == [""]:
+                return host
+            return f"{labels[-1]}.{suffix}"
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return ".".join(parts[-2:])
+    return host
+
+
 def _company_domain(job: dict[str, Any]) -> str:
     candidates = []
     company = job.get("company") if isinstance(job.get("company"), dict) else {}
@@ -254,7 +289,7 @@ def _company_domain(job: dict[str, Any]) -> str:
             continue
         host = host.lower().removeprefix("www.")
         if host and "linkedin.com" not in host:
-            return host
+            return _registrable_domain(host)
     return ""
 
 
@@ -613,6 +648,13 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
                     b1 = {}
                 if b1.get("error_code") == "NO_RESULTS":
                     print(f"  {company.get('name')}: no results")
+                    continue
+                # Soft-skip bad filters (e.g. leftover subdomain) for one company
+                if b1.get("error_code") == "INVALID_FILTERS":
+                    print(
+                        f"  {company.get('name')}: skip INVALID_FILTERS "
+                        f"({b1.get('filter_error') or 'bad filter'})"
+                    )
                     continue
                 raise PipelineError(
                     f"Prospeo search API error HTTP {r1.status_code}: {r1.text[:800]}"
