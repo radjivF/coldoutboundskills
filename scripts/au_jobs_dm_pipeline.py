@@ -11,6 +11,7 @@ Steps:
   5. Join jobs with DMs (jobTitle = hiring-for, position = person title)
   6. Push leads to Instantly campaign via POST /api/v2/leads/add
      (does NOT activate the campaign)
+  7. Upsert leads into Supabase table au_jobs_dm_leads
 
 On API errors or rate limits: stop and report (no blind retries).
 """
@@ -43,6 +44,7 @@ INSTANTLY_CAMPAIGN_ID = "5f5f4dc8-e9ba-47c6-be09-faec97ef26d0"
 INSTANTLY_API = "https://api.instantly.ai"
 PROSPEO_API = "https://api.prospeo.io"
 MV_API = "https://api.millionverifier.com/api/v3/"
+SUPABASE_TABLE = os.environ.get("AU_PIPELINE_SUPABASE_TABLE", "au_jobs_dm_leads")
 AU_GEO_ID = "101452733"
 MAX_JOBS = 50
 MAX_COMPANY_EMPLOYEES = 999
@@ -923,11 +925,95 @@ def push_instantly(api_key: str, leads: list[dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def push_supabase(leads: list[dict[str, Any]]) -> dict[str, Any]:
+    """Upsert leads into Supabase table au_jobs_dm_leads (service role)."""
+    url = (_secret("SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL") or "").rstrip("/")
+    key = _secret(
+        "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_KEY",
+        "SUPABASE_SECRET_KEY",
+    )
+    if not url or not key:
+        raise PipelineError(
+            "Missing Supabase secrets: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. "
+            "Add them to Automation Secrets / .env, apply scripts/sql/au_jobs_dm_leads.sql, "
+            "then re-run."
+        )
+
+    if not leads:
+        summary = {"upserted": 0, "table": SUPABASE_TABLE, "note": "no leads"}
+        print("[Supabase] No leads to upsert")
+        write_json(OUT_DIR / "07_supabase.json", summary)
+        return summary
+
+    run_date = datetime.now(timezone.utc).date().isoformat()
+    rows: list[dict[str, Any]] = []
+    for lead in leads:
+        email = (lead.get("email") or "").strip().lower()
+        if not email:
+            continue
+        rows.append(
+            {
+                "email": email,
+                "first_name": lead.get("first_name") or None,
+                "last_name": lead.get("last_name") or None,
+                "company_name": lead.get("company_name") or None,
+                "website": lead.get("website") or None,
+                "linkedin_url": lead.get("linkedin_url") or None,
+                "job_title": lead.get("jobTitle") or lead.get("job_title") or None,
+                "position": lead.get("position") or None,
+                "instantly_campaign_id": INSTANTLY_CAMPAIGN_ID,
+                "instantly_lead_id": lead.get("instantly_lead_id") or None,
+                "source": lead.get("source") or "au_jobs_dm_pipeline",
+                "run_date": lead.get("run_date") or run_date,
+                "raw": lead.get("raw") or lead,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+    endpoint = f"{url}/rest/v1/{SUPABASE_TABLE}"
+    print(f"[Supabase] Upsert {len(rows)} leads → {SUPABASE_TABLE}")
+    try:
+        resp = requests.post(
+            endpoint,
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            params={"on_conflict": "email"},
+            json=rows,
+            timeout=HTTP_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise PipelineError(f"Supabase network error: {exc}") from exc
+
+    if resp.status_code == 429:
+        raise PipelineError(f"Supabase rate limit (HTTP 429): {resp.text[:500]}")
+    if resp.status_code >= 400:
+        raise PipelineError(
+            f"Supabase upsert failed (HTTP {resp.status_code}): {resp.text[:800]}"
+        )
+
+    returned = resp.json() if resp.content else []
+    upserted = len(returned) if isinstance(returned, list) else len(rows)
+    summary = {
+        "upserted": upserted,
+        "table": SUPABASE_TABLE,
+        "url_host": url.split("//", 1)[-1].split("/", 1)[0],
+    }
+    print(f"[Supabase] upserted={upserted}")
+    write_json(OUT_DIR / "07_supabase.json", summary)
+    return summary
+
+
 def print_summary(
     jobs_kept: int,
     dms: int,
     ok_emails: int,
     instantly: dict[str, Any],
+    supabase: dict[str, Any] | None = None,
 ) -> None:
     print("\n========== AU JOBS DM PIPELINE SUMMARY ==========")
     print(f"jobs kept:           {jobs_kept}")
@@ -936,6 +1022,8 @@ def print_summary(
     print(f"Instantly uploaded:  {instantly.get('leads_uploaded', 0)}")
     print(f"Instantly duplicates:{instantly.get('duplicated_leads', 0)}")
     print(f"Instantly skipped:   {instantly.get('skipped_count', 0)}")
+    if supabase is not None:
+        print(f"Supabase upserted:   {supabase.get('upserted', 0)}")
     print("campaign activated:  NO")
     print(f"artifacts:           {OUT_DIR}")
     print("=================================================\n")
@@ -958,6 +1046,7 @@ def main() -> int:
         ok = millionverifier_keep_ok(secrets["MILLIONVERIFIER_API_KEY"], dms) if dms else []
         leads = join_jobs_with_dms(ok) if ok else []
         instantly = push_instantly(secrets["INSTANTLY_API_KEY"], leads)
+        supabase = push_supabase(leads)
 
         summary = {
             "started": started,
@@ -970,11 +1059,15 @@ def main() -> int:
                 "duplicates": instantly.get("duplicated_leads", 0),
                 "skipped": instantly.get("skipped_count", 0),
             },
+            "supabase": {
+                "upserted": supabase.get("upserted", 0),
+                "table": supabase.get("table"),
+            },
             "campaign_id": INSTANTLY_CAMPAIGN_ID,
             "campaign_activated": False,
         }
         write_json(OUT_DIR / "summary.json", summary)
-        print_summary(len(kept), len(dms), len(ok), instantly)
+        print_summary(len(kept), len(dms), len(ok), instantly, supabase)
         return 0
 
     except PipelineError as exc:
