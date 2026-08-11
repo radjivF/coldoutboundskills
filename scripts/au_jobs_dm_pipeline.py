@@ -934,11 +934,21 @@ def push_supabase(leads: list[dict[str, Any]]) -> dict[str, Any]:
         "SUPABASE_SECRET_KEY",
     )
     if not url or not key:
-        raise PipelineError(
-            "Missing Supabase secrets: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY. "
-            "Add them to Automation Secrets / .env, apply scripts/sql/au_jobs_dm_leads.sql, "
-            "then re-run."
+        # Optional step — daily Instantly outreach must not fail when Supabase
+        # secrets are absent from Automation Secrets.
+        summary = {
+            "upserted": 0,
+            "table": SUPABASE_TABLE,
+            "skipped": True,
+            "note": "missing SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY",
+        }
+        print(
+            "[Supabase] SKIPPED: missing SUPABASE_URL and/or SUPABASE_SERVICE_ROLE_KEY "
+            "(Instantly upload already completed; apply scripts/sql/au_jobs_dm_leads.sql "
+            "and add secrets to enable upserts)."
         )
+        write_json(OUT_DIR / "07_supabase.json", summary)
+        return summary
 
     if not leads:
         summary = {"upserted": 0, "table": SUPABASE_TABLE, "note": "no leads"}
