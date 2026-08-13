@@ -259,6 +259,7 @@ def _company_name(job: dict[str, Any]) -> str:
 # Multi-label public suffixes common in AU/outbound lists.
 # Prospeo rejects subdomains ("Subdomains are not supported"), so we collapse
 # hosts like super.myninja.ai → myninja.ai and careers.acme.com.au → acme.com.au.
+# Longer suffixes first so com.au / co.in win over bare com / last-2-label fallback.
 _MULTI_PART_SUFFIXES = (
     "com.au",
     "net.au",
@@ -268,7 +269,16 @@ _MULTI_PART_SUFFIXES = (
     "co.nz",
     "co.uk",
     "org.uk",
+    "co.in",
+    "com.in",
+    "net.in",
+    "org.in",
+    "co.za",
+    "com.br",
     "com",
+)
+_PUBLIC_SUFFIXES = frozenset(_MULTI_PART_SUFFIXES) | frozenset(
+    {"com", "net", "org", "co", "io", "ai", "in", "au", "uk", "nz", "za", "br"}
 )
 
 
@@ -283,12 +293,25 @@ def _registrable_domain(host: str) -> str:
             # Take one label + suffix (acme.com.au) — drop deeper subdomains
             labels = host[: -(len(suffix) + 1)].split(".")
             if not labels or labels == [""]:
-                return host
+                return ""
             return f"{labels[-1]}.{suffix}"
     parts = host.split(".")
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return host
+
+
+def _is_prospeo_website(domain: str) -> bool:
+    """Reject bare public suffixes / junk hosts Prospeo will 400 on."""
+    d = (domain or "").lower().strip().removeprefix("www.")
+    if not d or "." not in d or d in _PUBLIC_SUFFIXES:
+        return False
+    if any(ch.isspace() for ch in d) or "/" in d:
+        return False
+    label = d.split(".")[0]
+    if not label or label in _PUBLIC_SUFFIXES or len(label) < 2:
+        return False
+    return True
 
 
 def _company_domain(job: dict[str, Any]) -> str:
@@ -311,7 +334,9 @@ def _company_domain(job: dict[str, Any]) -> str:
             continue
         host = host.lower().removeprefix("www.")
         if host and "linkedin.com" not in host:
-            return _registrable_domain(host)
+            domain = _registrable_domain(host)
+            if _is_prospeo_website(domain):
+                return domain
     return ""
 
 
@@ -536,7 +561,16 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
         )
         entry["jobs"].append(job)
 
-    domains = [c["domain"] for c in companies.values() if c.get("domain")]
+    domains = [
+        c["domain"]
+        for c in companies.values()
+        if c.get("domain") and _is_prospeo_website(c["domain"])
+    ]
+    # Drop unusable websites so they fall through to name-only / per-company path
+    for c in companies.values():
+        if c.get("domain") and not _is_prospeo_website(c["domain"]):
+            print(f"[Prospeo] Ignoring invalid website for {c.get('name')}: {c['domain']}")
+            c["domain"] = ""
     names_only = [c["name"] for c in companies.values() if not c.get("domain") and c.get("name")]
     print(
         f"[Prospeo] Batched DM search across {len(domains)} domains "
@@ -589,12 +623,23 @@ def prospeo_search_dms(api_key: str, jobs: list[dict[str, Any]]) -> list[dict[st
             print("[Prospeo] Batched search: no results")
             write_json(OUT_DIR / "03_dms_enriched.json", [])
             return []
-        raise PipelineError(
-            f"Prospeo search API error HTTP {resp.status_code}: {resp.text[:800]}"
-        )
+        # Soft-skip bad batch filters: clear websites and continue via per-company fallback
+        if body.get("error_code") == "INVALID_FILTERS":
+            print(
+                f"[Prospeo] Batched search INVALID_FILTERS "
+                f"({body.get('filter_error') or 'bad filter'}); "
+                f"falling back to per-company search"
+            )
+            results = []
+            body = {"results": []}
+        else:
+            raise PipelineError(
+                f"Prospeo search API error HTTP {resp.status_code}: {resp.text[:800]}"
+            )
 
-    body = resp.json()
-    results = body.get("results") or []
+    if resp.status_code < 400:
+        body = resp.json()
+        results = body.get("results") or []
     print(f"[Prospeo] Batched search returned {len(results)} people (pre title-gate)")
 
     # Map domain -> company entry for joining jobs
