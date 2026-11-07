@@ -257,10 +257,6 @@ def preflight_millionverifier(api_key: str) -> None:
     credits = data.get("credits")
     result = str(data.get("result") or "").lower()
     err = str(data.get("error") or "")
-    print(
-        f"[MillionVerifier] preflight OK credits={credits} "
-        f"result={result or '-'} error={err or '-'}"
-    )
 
     insufficient = (
         (isinstance(credits, (int, float)) and credits <= 0)
@@ -268,12 +264,20 @@ def preflight_millionverifier(api_key: str) -> None:
         or (result == "error" and "credit" in err.lower())
     )
     if insufficient:
+        print(
+            f"[MillionVerifier] preflight FAIL credits={credits} "
+            f"result={result or '-'} error={err or '-'}"
+        )
         raise PipelineError(
             "MillionVerifier insufficient credits: "
             f"credits={credits} result={result} error={err or data}. "
             "Top up MillionVerifier before re-running "
             "(Apify + Prospeo skipped to avoid burning credits)."
         )
+    print(
+        f"[MillionVerifier] preflight OK credits={credits} "
+        f"result={result or '-'} error={err or '-'}"
+    )
 
 
 def preflight_instantly(api_key: str) -> None:
